@@ -1,0 +1,41 @@
+name: Mirror upstream releases
+
+on:
+  schedule:
+    - cron: '10 1 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mirror missing upstream releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          UPSTREAM="mdc-ng/mdc-ng"
+          FORK="Helenvin/mdc-ng"
+          AUTH="Authorization: Bearer $GH_TOKEN"
+          curl -sfL -H "$AUTH" "https://api.github.com/repos/${UPSTREAM}/releases?per_page=100" -o upstream.json
+          curl -sfL -H "$AUTH" "https://api.github.com/repos/${FORK}/releases?per_page=100" -o fork.json
+          jq -r '.[].tag_name' fork.json | sort > fork_tags.txt
+          mirrored=0
+          for tag in $(jq -r '.[].tag_name' upstream.json); do
+            if grep -qxF "$tag" fork_tags.txt; then continue; fi
+            echo "Mirroring $tag ..."
+            body="$(jq -r --arg t "$tag" '.[] | select(.tag_name==$t) | .body // ""' upstream.json)"
+            rel_id="$(curl -sfL -X POST -H "$AUTH" "https://api.github.com/repos/${FORK}/releases" -d "$(jq -n --arg t "$tag" --arg b "$body" '{tag_name:$t,name:$t,body:$b}')" | jq -r '.id')"
+            jq -r --arg t "$tag" '.[] | select(.tag_name==$t) | .assets[] | "\(.id)\t\(.name)"' upstream.json | while IFS=$'\t' read -r aid name; do
+              echo "  downloading $name"
+              curl -sfL -H "$AUTH" -H "Accept: application/octet-stream" "https://api.github.com/repos/${UPSTREAM}/releases/assets/$aid" -o "/tmp/$name"
+              curl -sfL -X POST -H "$AUTH" -H "Content-Type: application/octet-stream" --data-binary "@/tmp/$name" "https://api.github.com/repos/${FORK}/releases/${rel_id}/assets?name=${name}" -o /dev/null
+              rm -f "/tmp/$name"
+              echo "  uploaded $name"
+            done
+            mirrored=$((mirrored+1))
+          done
+          echo "Mirrored ${mirrored} release(s)"
