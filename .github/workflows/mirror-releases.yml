@@ -20,23 +20,26 @@ jobs:
           UPSTREAM="mdc-ng/mdc-ng"
           FORK="Helenvin/mdc-ng"
           AUTH="Authorization: Bearer $GH_TOKEN"
-          curl -sfL -H "$AUTH" "https://api.github.com/repos/${UPSTREAM}/releases?per_page=100" -o upstream.json
-          curl -sfL -H "$AUTH" "https://api.github.com/repos/${FORK}/releases?per_page=100" -o fork.json
+          curl -sSfL -H "$AUTH" "https://api.github.com/repos/${UPSTREAM}/releases?per_page=100" -o upstream.json
+          curl -sSfL -H "$AUTH" "https://api.github.com/repos/${FORK}/releases?per_page=100" -o fork.json
           jq -r '.[].tag_name' fork.json | sort > fork_tags.txt
           mirrored=0
           for tag in $(jq -r '.[].tag_name' upstream.json); do
             if grep -qxF "$tag" fork_tags.txt; then continue; fi
             echo "Mirroring $tag ..."
             body="$(jq -r --arg t "$tag" '.[] | select(.tag_name==$t) | .body // ""' upstream.json)"
-            rel_id="$(curl -sfL -X POST -H "$AUTH" "https://api.github.com/repos/${FORK}/releases" -d "$(jq -n --arg t "$tag" --arg b "$body" '{tag_name:$t,name:$t,body:$b}')" | jq -r '.id')"
-            # 用无需认证的 browser_download_url 下载（带 Authorization 跟随 S3 重定向会被拒）
-            jq -r --arg t "$tag" '.[] | select(.tag_name==$t) | .assets[] | "\(.name)\t\(.browser_download_url)"' upstream.json | while IFS=$'\t' read -r name burl; do
+            rel_json="$(curl -sSfL -X POST -H "$AUTH" "https://api.github.com/repos/${FORK}/releases" -d "$(jq -n --arg t "$tag" --arg b "$body" '{tag_name:$t,name:$t,body:$b}')")"
+            rel_id="$(echo "$rel_json" | jq -r '.id')"
+            echo "  created release id: $rel_id"
+            while IFS=$'\t' read -r name burl; do
               echo "  downloading $name"
-              curl -sfL "$burl" -o "/tmp/$name"
-              curl -sfL -X POST -H "$AUTH" -H "Content-Type: application/octet-stream" --data-binary "@/tmp/$name" "https://api.github.com/repos/${FORK}/releases/${rel_id}/assets?name=${name}" -o /dev/null
-              rm -f "/tmp/$name"
+              code="$(curl -sL -w '%{http_code}' -o "/tmp/$name" "$burl")"
+              if [ "$code" != "200" ]; then echo "  DOWNLOAD FAILED http=$code"; exit 1; fi
+              code="$(curl -s -w '%{http_code}' -X POST -H "$AUTH" -H 'Content-Type: application/octet-stream' --data-binary "@/tmp/$name" "https://uploads.github.com/repos/${FORK}/releases/${rel_id}/assets?name=${name}" -o /tmp/up_resp.json)"
+              if [ "$code" != "201" ]; then echo "  UPLOAD FAILED http=$code"; cat /tmp/up_resp.json; exit 1; fi
+              rm -f "/tmp/$name" /tmp/up_resp.json
               echo "  uploaded $name"
-            done
+            done < <(jq -r --arg t "$tag" '.[] | select(.tag_name==$t) | .assets[] | "\(.name)\t\(.browser_download_url)"' upstream.json)
             mirrored=$((mirrored+1))
           done
           echo "Mirrored ${mirrored} release(s)"
