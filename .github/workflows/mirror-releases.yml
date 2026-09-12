@@ -29,9 +29,10 @@ jobs:
             echo "Mirroring $tag ..."
             body="$(jq -r --arg t "$tag" '.[] | select(.tag_name==$t) | .body // ""' upstream.json)"
             rel_id="$(curl -sfL -X POST -H "$AUTH" "https://api.github.com/repos/${FORK}/releases" -d "$(jq -n --arg t "$tag" --arg b "$body" '{tag_name:$t,name:$t,body:$b}')" | jq -r '.id')"
-            jq -r --arg t "$tag" '.[] | select(.tag_name==$t) | .assets[] | "\(.id)\t\(.name)"' upstream.json | while IFS=$'\t' read -r aid name; do
+            # 用无需认证的 browser_download_url 下载（带 Authorization 跟随 S3 重定向会被拒）
+            jq -r --arg t "$tag" '.[] | select(.tag_name==$t) | .assets[] | "\(.name)\t\(.browser_download_url)"' upstream.json | while IFS=$'\t' read -r name burl; do
               echo "  downloading $name"
-              curl -sfL -H "$AUTH" -H "Accept: application/octet-stream" "https://api.github.com/repos/${UPSTREAM}/releases/assets/$aid" -o "/tmp/$name"
+              curl -sfL "$burl" -o "/tmp/$name"
               curl -sfL -X POST -H "$AUTH" -H "Content-Type: application/octet-stream" --data-binary "@/tmp/$name" "https://api.github.com/repos/${FORK}/releases/${rel_id}/assets?name=${name}" -o /dev/null
               rm -f "/tmp/$name"
               echo "  uploaded $name"
